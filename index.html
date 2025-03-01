@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>华容道游戏（优化版）</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background: #f0f0f0;
+            margin: 0;
+            min-height: 100vh;
+        }
+
+        .container {
+            margin: 20px;
+            padding: 20px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            max-width: 90%;
+        }
+
+        .controls {
+            margin: 10px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: center;
+            align-items: center;
+        }
+
+        button {
+            padding: 8px 16px;
+            font-size: 14px;
+            cursor: pointer;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            transition: background 0.3s;
+        }
+
+        button:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+        }
+
+        button:hover:not(:disabled) {
+            background: #45a049;
+        }
+
+        select {
+            padding: 6px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+
+        .board {
+            display: grid;
+            gap: 4px;
+            background: #333;
+            padding: 4px;
+            border-radius: 8px;
+            margin: 10px;
+        }
+
+        .tile {
+            width: 50px;
+            height: 50px;
+            background: #fff;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 20px;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: transform 0.2s;
+            user-select: none;
+        }
+
+        .empty {
+            background: transparent;
+            visibility: hidden;
+        }
+
+        .speed-control {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .stats {
+            font-size: 16px;
+            margin: 10px;
+            text-align: center;
+        }
+
+        #loader {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(255, 255, 255, 0.9);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            font-size: 24px;
+            z-index: 1000;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="controls">
+            <select id="sizeSelect" onchange="newGame()">
+                <option value="3">3x3</option>
+                <option value="4">4x4</option>
+                <option value="5">5x5</option>
+            </select>
+            <button onclick="solve()" id="solveBtn">自动求解</button>
+            <button onclick="shuffle()">重新打乱</button>
+            <div class="speed-control">
+                <label>速度:</label>
+                <input type="range" id="speed" min="100" max="1000" value="500">
+            </div>
+        </div>
+        <div id="board" class="board"></div>
+        <div class="stats">步数: <span id="steps">0</span></div>
+    </div>
+    <div id="loader">求解中...</div>
+
+<script>
+const workerScript = `
+class PuzzleSolver {
+    constructor(size) {
+        this.size = size;
+        this.goal = this.createGoal();
+    }
+
+    createGoal() {
+        const arr = [];
+        for(let i=1; i<this.size*this.size; i++) arr.push(i);
+        arr.push(0);
+        return arr;
+    }
+
+    getHeuristic(state) {
+        let distance = 0;
+        const size = this.size;
+        
+        // 曼哈顿距离
+        for(let i=0; i<state.length; i++) {
+            if(state[i] === 0) continue;
+            const goalPos = this.goal.indexOf(state[i]);
+            const x1 = i % size, y1 = Math.floor(i / size);
+            const x2 = goalPos % size, y2 = Math.floor(goalPos / size);
+            distance += Math.abs(x1 - x2) + Math.abs(y1 - y2);
+        }
+        
+        // 线性冲突检测
+        for(let row=0; row<size; row++) {
+            const tiles = state.slice(row*size, (row+1)*size)
+                             .filter(t => t !== 0 && Math.floor((t-1)/size) === row);
+            for(let i=0; i<tiles.length; i++) {
+                for(let j=i+1; j<tiles.length; j++) {
+                    if(tiles[i] > tiles[j]) distance += 2;
+                }
+            }
+        }
+        return distance;
+    }
+
+    idaStarSolve(initialState) {
+        let threshold = this.getHeuristic(initialState);
+        const path = [];
+        
+        while(true) {
+            const result = this.search(initialState, 0, threshold, path);
+            if(result.found) return result.path;
+            if(result.cost === Infinity) return [];
+            threshold = result.cost;
+        }
+    }
+
+    search(state, g, threshold, path) {
+        const h = this.getHeuristic(state);
+        const f = g + h;
+        
+        if(f > threshold) return { cost: f, found: false };
+        if(h === 0) return { cost: f, found: true, path: [...path] };
+        
+        let min = Infinity;
+        const emptyIndex = state.indexOf(0);
+        const moves = this.getValidMoves(emptyIndex);
+        
+        for(const move of moves) {
+            if(path[path.length-1] === move) continue;
+            
+            const newState = [...state];
+            [newState[emptyIndex], newState[move]] = [newState[move], newState[emptyIndex]];
+            
+            // 修改Worker中的search函数调用部分，将emptyIndex替换为move
+            const result = this.search(newState, g+1, threshold, [...path, move]);
+            if(result.found) return result;
+            if(result.cost < min) min = result.cost;
+        }
+        return { cost: min, found: false };
+    }
+
+    getValidMoves(emptyIndex) {
+        const moves = [];
+        const size = this.size;
+        const row = Math.floor(emptyIndex / size);
+        const col = emptyIndex % size;
+        
+        if(row > 0) moves.push(emptyIndex - size);
+        if(row < size-1) moves.push(emptyIndex + size);
+        if(col > 0) moves.push(emptyIndex - 1);
+        if(col < size-1) moves.push(emptyIndex + 1);
+        return moves;
+    }
+}
+
+self.onmessage = function(e) {
+    const { size, tiles } = e.data;
+    const solver = new PuzzleSolver(size);
+    const solution = solver.idaStarSolve(tiles);
+    postMessage(solution);
+}
+`;
+
+const solverWorker = new Worker(URL.createObjectURL(
+    new Blob([workerScript], { type: 'text/javascript' })
+));
+
+let game = {
+    size: 3,
+    tiles: [],
+    steps: 0,
+    solving: false,
+    animationSpeed: 300,
+    solution: null,
+    loading: false
+};
+
+function newGame() {
+    game.size = parseInt(document.getElementById('sizeSelect').value);
+    game.steps = 0;
+    game.solving = false;
+    game.tiles = createSolvedPuzzle(game.size);
+    shufflePuzzle(game.tiles, game.size * 20);
+    updateDisplay();
+}
+
+function createSolvedPuzzle(size) {
+    const arr = [];
+    for(let i=1; i<size*size; i++) arr.push(i);
+    arr.push(0);
+    return arr;
+}
+
+function shufflePuzzle(tiles, moves) {
+    game.solving = false
+    let emptyIndex = tiles.indexOf(0);
+    for(let i=0; i<moves; i++) {
+        const validMoves = getValidMoves(emptyIndex, game.size);
+        const move = validMoves[Math.floor(Math.random()*validMoves.length)];
+        [tiles[emptyIndex], tiles[move]] = [tiles[move], tiles[emptyIndex]];
+        emptyIndex = move;
+    }
+}
+
+function getValidMoves(emptyIndex, size) {
+    const moves = [];
+    const row = Math.floor(emptyIndex / size);
+    const col = emptyIndex % size;
+    
+    if(row > 0) moves.push(emptyIndex - size);
+    if(row < size-1) moves.push(emptyIndex + size);
+    if(col > 0) moves.push(emptyIndex - 1);
+    if(col < size-1) moves.push(emptyIndex + 1);
+    return moves;
+}
+
+function updateDisplay() {
+    const board = document.getElementById('board');
+    const tileSize = game.size > 4 ? 40 : 50;
+    board.style.gridTemplateColumns = `repeat(${game.size}, ${tileSize}px)`;
+    board.innerHTML = '';
+    
+    game.tiles.forEach((num, index) => {
+        const tile = document.createElement('div');
+        tile.className = `tile ${num === 0 ? 'empty' : ''}`;
+        tile.textContent = num || '';
+        tile.onclick = () => moveTile(index);
+        board.appendChild(tile);
+    });
+    
+    document.getElementById('steps').textContent = 0 > game.steps ? '0' : game.steps;
+    document.getElementById('solveBtn').disabled = game.solving;
+}
+
+function moveTile(index) {
+    if(game.solving) return;
+    const emptyIndex = game.tiles.indexOf(0);
+    const validMoves = getValidMoves(emptyIndex, game.size);
+    
+    if(validMoves.includes(index)) {
+        [game.tiles[emptyIndex], game.tiles[index]] = [game.tiles[index], game.tiles[emptyIndex]];
+        game.steps++;
+        updateDisplay();
+        checkWin();
+    }
+}
+
+async function solve() {
+    if(game.solving || game.loading) return;
+    showLoader(true);
+    
+    game.solving = true;
+    game.loading = true;
+    game.steps = 0;
+    updateDisplay();
+    
+    solverWorker.postMessage({
+        size: game.size,
+        tiles: [...game.tiles]
+    });
+    
+    solverWorker.onmessage = async (e) => {
+        const solution = e.data;
+        game.loading = false;
+        showLoader(false);
+        
+        if(solution.length === 0) {
+            alert("求解失败！");
+            game.solving = false;
+            return;
+        }
+        
+        for(const move of solution) {
+            if (!game.solving) break; // 提前终止条件
+            
+            const emptyIndex = game.tiles.indexOf(0);
+            [game.tiles[emptyIndex], game.tiles[move]] = 
+                [game.tiles[move], game.tiles[emptyIndex]];
+            game.steps++;
+            await new Promise(resolve => setTimeout(
+                resolve, 
+                1000 - document.getElementById('speed').value
+            ));
+            updateDisplay();
+            
+            // 每次移动后检查胜利条件，如果胜利则终止循环
+            if (checkWin()) {
+                game.solving = true;
+                // 在屏幕背景显示胜利
+                
+                const winMessage = document.createElement('div');
+                winMessage.textContent = `胜利！总步数：${game.steps}`;
+                winMessage.style.position = 'fixed';
+                winMessage.style.top = '50%';
+                winMessage.style.left = '50%';
+                winMessage.style.transform = 'translate(-50%, -50%)';
+                winMessage.style.background = 'rgba(0, 0, 0, 0.8)';
+                winMessage.style.color = 'white';
+                winMessage.style.padding = '20px';
+                winMessage.style.borderRadius = '10px';
+                winMessage.style.zIndex = '1001';
+                document.body.appendChild(winMessage);
+                
+                //几秒后删除
+                setTimeout(() => {
+                    document.body.removeChild(winMessage);
+                }, 2000);
+                return;
+            }
+        }
+        
+        game.solving = false;
+        // 循环结束后再次检查确保胜利状态
+        checkWin();
+    }
+}
+
+function checkWin() {
+    const goal = createSolvedPuzzle(game.size);
+    if(game.tiles.join(',') === goal.join(',')) {
+        
+        return true;
+    }
+    return false;
+}
+
+function shuffle() {
+    shufflePuzzle(game.tiles, game.size * 20);
+
+    game.steps = 0;
+    updateDisplay();
+    document.getElementById('solveBtn').enabled = true;
+}
+
+function showLoader(show) {
+    document.getElementById('loader').style.display = show ? 'flex' : 'none';
+}
+
+// 初始化
+document.getElementById('speed').addEventListener('input', () => {
+    game.animationSpeed = 1000 - document.getElementById('speed').value;
+});
+
+newGame();
+</script>
+</body>
+</html>
